@@ -1,5 +1,4 @@
 """Cloudtype deployment: TradingView signal filter only (no MT5 connection)."""
-import hmac
 import os
 import re
 import sqlite3
@@ -7,12 +6,10 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 
 app = FastAPI(title="TradingView signal filter")
 
-WEBHOOK_TOKEN = os.environ["WEBHOOK_TOKEN"]
-EXECUTOR_TOKEN = os.environ["EXECUTOR_TOKEN"]
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", "signals.db"))
 WAIT_SECONDS = int(os.getenv("WAIT_SECONDS", "1200"))
 LEASE_SECONDS = int(os.getenv("LEASE_SECONDS", "90"))
@@ -32,12 +29,6 @@ def database():
 
 def now_iso() -> str:
     return datetime.now(UTC).isoformat()
-
-
-def require_executor(authorization: str | None):
-    expected = f"Bearer {EXECUTOR_TOKEN}"
-    if authorization is None or not hmac.compare_digest(authorization, expected):
-        raise HTTPException(status_code=401, detail="unauthorized")
 
 
 def ensure_schema():
@@ -92,10 +83,8 @@ def create_signal(db: sqlite3.Connection, symbol: str, direction: str) -> int:
     return cursor.lastrowid
 
 
-@app.post("/webhook/{token}")
-async def tradingview_webhook(token: str, request: Request):
-    if not hmac.compare_digest(token, WEBHOOK_TOKEN):
-        raise HTTPException(status_code=404, detail="not found")
+@app.post("/webhook")
+async def tradingview_webhook(request: Request):
     parsed = parse_message((await request.body()).decode("utf-8", errors="replace"))
     if parsed is None:
         return {"status": "ignored", "reason": "unsupported_message"}
@@ -129,8 +118,7 @@ async def tradingview_webhook(token: str, request: Request):
 
 
 @app.get("/api/v1/signals/next")
-def next_signal(executor_id: str, authorization: str | None = Header(default=None)):
-    require_executor(authorization)
+def next_signal(executor_id: str):
     with database() as db:
         db.execute("BEGIN IMMEDIATE")
         now = now_iso()
@@ -146,8 +134,7 @@ def next_signal(executor_id: str, authorization: str | None = Header(default=Non
 
 
 @app.post("/api/v1/signals/{signal_id}/ack")
-async def acknowledge(signal_id: int, request: Request, authorization: str | None = Header(default=None)):
-    require_executor(authorization)
+async def acknowledge(signal_id: int, request: Request):
     payload = await request.json()
     status = payload.get("status")
     if status not in ("done", "failed"):
