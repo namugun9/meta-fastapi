@@ -5,6 +5,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional, Tuple
 
 from fastapi import FastAPI, HTTPException, Request
 
@@ -57,7 +58,7 @@ def startup():
     ensure_schema()
 
 
-def parse_message(message: str) -> tuple[str, str] | None:
+def parse_message(message: str) -> Optional[Tuple[str, str]]:
     """Accept only explicit messages such as NAS_지지구간, BTC_0선돌파, NAS_청산."""
     normalized = re.sub(r"\s+", "", message).upper()
     match = re.match(r"^(NAS|BTC)_(.+)$", normalized)
