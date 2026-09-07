@@ -1162,3 +1162,18 @@ def health():
         "trading_time": is_trade_time_kst(),
         "wait_seconds": WAIT_SECONDS,
     }
+# =========================================================
+# Uvicorn 실행
+# 정상적인 HTTP access log 숨김
+# 실제 신호/오류 로그는 그대로 표시
+# =========================================================
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "8000")),
+        access_log=False,
+    )
