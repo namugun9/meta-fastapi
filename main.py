@@ -15,8 +15,8 @@ XM MT5
 최종 NAS 로직
 ------------------------------------------------
 1. NAS 지지구간 생성/진입
-   → 60분 동안 매수세력감지 대기
-
+   → 120분 동안 매수세력감지 대기
+   
 2. 대기 중 매수세력감지
    → BUY
 
@@ -24,7 +24,7 @@ XM MT5
    → 대기 상태와 관계없이 CLOSE_BUY
 
 4. NAS 저항구간 생성/진입
-   → 60분 동안 매도세력감지 대기
+   → 120분 동안 매도세력감지 대기
 
 5. 대기 중 매도세력감지
    → SELL
@@ -33,7 +33,7 @@ XM MT5
    → 대기 상태와 관계없이 CLOSE_SELL
 
 7. 같은 방향 구간 신호가 다시 오면
-   → 해당 방향 60분 갱신
+   → 해당 방향 120분 갱신
 
 8. BTC
    → 전부 무시
@@ -68,7 +68,7 @@ DATABASE_PATH = Path(
 )
 
 # 60분
-WAIT_SECONDS = 60 * 60
+WAIT_SECONDS = 120 * 60
 
 # MT5 Executor가 신호를 빌리는 시간
 LEASE_SECONDS = int(
@@ -699,7 +699,7 @@ async def tradingview_webhook(
 
             print(
                 "[WAIT BUY] "
-                "NAS 지지구간 → 60분 시작/갱신"
+                "NAS 지지구간 → 120분 시작/갱신"
             )
 
             return {
@@ -742,7 +742,7 @@ async def tradingview_webhook(
 
             print(
                 "[WAIT SELL] "
-                "NAS 저항구간 → 60분 시작/갱신"
+                "NAS 저항구간 → 120분 시작/갱신"
             )
 
             return {
@@ -864,7 +864,7 @@ async def tradingview_webhook(
 
                 print(
                     "[SELL IGNORED] "
-                    "60분 대기 만료"
+                    "120분 대기 만료"
                 )
 
                 return {
