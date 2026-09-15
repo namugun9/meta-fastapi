@@ -211,18 +211,18 @@ def parse_message(
     매수세력빠짐
     매도세력빠짐
 
-    세력빠짐
-
     BTC
     → 무조건 무시
     """
 
-    # 공백 / 줄바꿈 제거
+    # 공백 / 이모지 / 특수문자 제거
+    # 예: "NAS 🟡 지지구간 진입 30"
+    #     → "NAS지지구간진입30"
     normalized = re.sub(
-        r"\s+",
+        r"[^A-Z0-9가-힣_]",
         "",
-        message
-    ).upper()
+        message.upper()
+    )
 
     # -----------------------------------------------------
     # BTC
@@ -246,16 +246,6 @@ def parse_message(
 
     if "매도세력빠짐" in normalized:
         return "NAS", "close_sell"
-
-    # -----------------------------------------------------
-    # 일반 세력빠짐
-    #
-    # 방향 정보가 없는 경우
-    # MT5에서 실제 포지션을 확인하도록 CLOSE 전달
-    # -----------------------------------------------------
-
-    if "세력빠짐" in normalized:
-        return "NAS", "close"
 
     # -----------------------------------------------------
     # 매수세력감지
@@ -674,35 +664,6 @@ async def tradingview_webhook(
                 "id": signal_id,
                 "symbol": "NAS",
                 "direction": "CLOSE_SELL",
-                "kst": kst_now_text(),
-            }
-
-        # =================================================
-        # [C] 일반 세력빠짐
-        #
-        # 방향 정보가 없으므로 CLOSE 전달
-        # MT5에서 실제 포지션 확인
-        # =================================================
-
-        if event == "close":
-
-            clear_all_waiting(db)
-
-            signal_id = create_signal(
-                db,
-                "NAS",
-                "CLOSE"
-            )
-
-            print(
-                f"[CLOSE] signal_id={signal_id}"
-            )
-
-            return {
-                "status": "final_signal",
-                "id": signal_id,
-                "symbol": "NAS",
-                "direction": "CLOSE",
                 "kst": kst_now_text(),
             }
 
@@ -1214,22 +1175,38 @@ async def acknowledge(
 
     payload = await request.json()
 
-    status = payload.get(
-        "status"
-    )
+    # 현재 MT5 Executor 형식:
+    # {
+    #     "success": true/false,
+    #     "result_detail": "..."
+    # }
+    #
+    # 기존 status/detial 형식도 호환
+    success = payload.get("success")
 
-    if status not in (
-        "done",
-        "failed"
-    ):
+    if success is not None:
+        status = "done" if bool(success) else "failed"
+        detail = str(
+            payload.get("result_detail", "")
+        )[:500]
+    else:
+        status = payload.get("status")
 
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "status must be "
-                "done or failed"
-            ),
-        )
+        if status not in (
+            "done",
+            "failed"
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "success must be true/false "
+                    "or status must be done/failed"
+                ),
+            )
+
+        detail = str(
+            payload.get("detail", "")
+        )[:500]
 
     with database() as db:
 
@@ -1246,14 +1223,7 @@ async def acknowledge(
             """,
             (
                 status,
-
-                str(
-                    payload.get(
-                        "detail",
-                        ""
-                    )
-                )[:500],
-
+                detail,
                 signal_id,
             ),
         ).rowcount
