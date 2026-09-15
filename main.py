@@ -791,7 +791,7 @@ async def tradingview_webhook(
 
                 print(
                     "[BUY IGNORED] "
-                    "60분 대기 만료"
+                    "120분 대기 만료"
                 )
 
                 return {
