@@ -619,8 +619,6 @@ async def tradingview_webhook(
 
         if event == "close_buy":
 
-            clear_buy_waiting(db)
-
             signal_id = create_signal(
                 db,
                 "NAS",
@@ -646,8 +644,6 @@ async def tradingview_webhook(
         # =================================================
 
         if event == "close_sell":
-
-            clear_sell_waiting(db)
 
             signal_id = create_signal(
                 db,
