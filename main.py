@@ -1,50 +1,3 @@
-"""
-엘라 자동매매 - Cloudtype TradingView 신호 필터
-================================================
-
-TradingView
-    ↓
-Cloudtype FastAPI
-    ↓
-SQLite 신호 DB
-    ↓
-로컬 MT5 Executor
-    ↓
-XM MT5
-
-최종 NAS 로직
-------------------------------------------------
-1. NAS 지지구간 생성/진입
-   → 120분 동안 매수세력감지 대기
-   
-2. 대기 중 매수세력감지
-   → BUY
-
-3. 매수세력빠짐
-   → 대기 상태와 관계없이 CLOSE_BUY
-
-4. NAS 저항구간 생성/진입
-   → 120분 동안 매도세력감지 대기
-
-5. 대기 중 매도세력감지
-   → SELL
-
-6. 매도세력빠짐
-   → 대기 상태와 관계없이 CLOSE_SELL
-
-7. 같은 방향 구간 신호가 다시 오면
-   → 해당 방향 120분 갱신
-
-8. BTC
-   → 전부 무시
-
-9. 신규매매 시간 제한
-   → 없음
-
-10. 청산 여부
-   → MT5가 실제 포지션을 확인
-"""
-
 import os
 import re
 import sqlite3
@@ -67,7 +20,7 @@ DATABASE_PATH = Path(
     os.getenv("DATABASE_PATH", "signals.db")
 )
 
-# 60분
+# 같은 방향의 두 신호가 완성될 수 있는 최대 대기시간
 WAIT_SECONDS = 120 * 60
 
 # MT5 Executor가 신호를 빌리는 시간
@@ -85,12 +38,10 @@ KST = timezone(timedelta(hours=9))
 
 @contextmanager
 def database():
-
     connection = sqlite3.connect(
         DATABASE_PATH,
         timeout=30
     )
-
     connection.row_factory = sqlite3.Row
 
     try:
@@ -120,15 +71,10 @@ def ensure_schema():
     with database() as db:
 
         # -------------------------------------------------
-        # 대기 상태
+        # NAS BUY 조합 대기
         #
-        # NAS BUY
-        #   support_ready
-        #   support_at
-        #
-        # NAS SELL
-        #   resistance_ready
-        #   resistance_at
+        # 지지구간 / 매수세력감지
+        # 어느 것이 먼저 와도 120분 동안 서로 기다린다.
         # -------------------------------------------------
 
         db.execute("""
@@ -138,12 +84,44 @@ def ensure_schema():
             support_ready INTEGER NOT NULL DEFAULT 0,
             support_at TEXT,
 
+            buy_force_ready INTEGER NOT NULL DEFAULT 0,
+            buy_force_at TEXT,
+
             resistance_ready INTEGER NOT NULL DEFAULT 0,
             resistance_at TEXT,
+
+            sell_force_ready INTEGER NOT NULL DEFAULT 0,
+            sell_force_at TEXT,
 
             updated_at TEXT NOT NULL
         )
         """)
+
+        # 기존 DB에 새 컬럼이 없을 경우 추가
+        existing = {
+            row["name"]
+            for row in db.execute(
+                "PRAGMA table_info(waiting)"
+            ).fetchall()
+        }
+
+        new_columns = {
+            "buy_force_ready":
+                "INTEGER NOT NULL DEFAULT 0",
+            "buy_force_at":
+                "TEXT",
+            "sell_force_ready":
+                "INTEGER NOT NULL DEFAULT 0",
+            "sell_force_at":
+                "TEXT",
+        }
+
+        for column, definition in new_columns.items():
+            if column not in existing:
+                db.execute(
+                    f"ALTER TABLE waiting ADD COLUMN "
+                    f"{column} {definition}"
+                )
 
         # -------------------------------------------------
         # 최종 신호
@@ -182,7 +160,6 @@ def ensure_schema():
 
 @app.on_event("startup")
 def startup():
-
     ensure_schema()
 
 
@@ -216,8 +193,6 @@ def parse_message(
     """
 
     # 공백 / 이모지 / 특수문자 제거
-    # 예: "NAS 🟡 지지구간 진입 30"
-    #     → "NAS지지구간진입30"
     normalized = re.sub(
         r"[^A-Z0-9가-힣_]",
         "",
@@ -226,8 +201,6 @@ def parse_message(
 
     # -----------------------------------------------------
     # BTC
-    #
-    # 가장 먼저 차단
     # -----------------------------------------------------
 
     if normalized.startswith("BTC"):
@@ -262,53 +235,35 @@ def parse_message(
         return "NAS", "sell_force"
 
     # -----------------------------------------------------
-    # NAS 지지구간 생성
+    # NAS 지지구간
+    # 생성/진입 모두 같은 BUY 조건
     # -----------------------------------------------------
 
-    if normalized.startswith(
-        "NAS지지구간생성"
-    ):
+    if normalized.startswith("NAS지지구간생성"):
+        return "NAS", "support"
+
+    if normalized.startswith("NAS지지구간진입"):
         return "NAS", "support"
 
     # -----------------------------------------------------
-    # NAS 지지구간 진입
+    # NAS 저항구간
+    # 생성/진입 모두 같은 SELL 조건
     # -----------------------------------------------------
 
-    if normalized.startswith(
-        "NAS지지구간진입"
-    ):
-        return "NAS", "support"
-
-    # -----------------------------------------------------
-    # NAS 저항구간 생성
-    # -----------------------------------------------------
-
-    if normalized.startswith(
-        "NAS저항구간생성"
-    ):
+    if normalized.startswith("NAS저항구간생성"):
         return "NAS", "resistance"
 
-    # -----------------------------------------------------
-    # NAS 저항구간 진입
-    # -----------------------------------------------------
-
-    if normalized.startswith(
-        "NAS저항구간진입"
-    ):
+    if normalized.startswith("NAS저항구간진입"):
         return "NAS", "resistance"
 
     # -----------------------------------------------------
     # 기존 underscore 형식도 일부 호환
     # -----------------------------------------------------
 
-    if normalized.startswith(
-        "NAS_지지구간"
-    ):
+    if normalized.startswith("NAS_지지구간"):
         return "NAS", "support"
 
-    if normalized.startswith(
-        "NAS_저항구간"
-    ):
+    if normalized.startswith("NAS_저항구간"):
         return "NAS", "resistance"
 
     return None
@@ -368,12 +323,20 @@ def ensure_nas_waiting(db):
             symbol,
             support_ready,
             support_at,
+            buy_force_ready,
+            buy_force_at,
             resistance_ready,
             resistance_at,
+            sell_force_ready,
+            sell_force_at,
             updated_at
         )
         VALUES (
             'NAS',
+            0,
+            NULL,
+            0,
+            NULL,
             0,
             NULL,
             0,
@@ -388,7 +351,7 @@ def ensure_nas_waiting(db):
 
 
 # =========================================================
-# [7] NAS BUY 대기 삭제
+# [7] 개별 BUY 대기 삭제
 # =========================================================
 
 def clear_buy_waiting(db):
@@ -396,18 +359,18 @@ def clear_buy_waiting(db):
     db.execute(
         """
         UPDATE waiting
-
         SET
             support_ready = 0,
-            support_at = NULL
-
+            support_at = NULL,
+            buy_force_ready = 0,
+            buy_force_at = NULL
         WHERE symbol = 'NAS'
         """
     )
 
 
 # =========================================================
-# [8] NAS SELL 대기 삭제
+# [8] 개별 SELL 대기 삭제
 # =========================================================
 
 def clear_sell_waiting(db):
@@ -415,35 +378,24 @@ def clear_sell_waiting(db):
     db.execute(
         """
         UPDATE waiting
-
         SET
             resistance_ready = 0,
-            resistance_at = NULL
-
+            resistance_at = NULL,
+            sell_force_ready = 0,
+            sell_force_at = NULL
         WHERE symbol = 'NAS'
         """
     )
 
 
 # =========================================================
-# [9] NAS 전체 대기 삭제
+# [9] BUY 조합 유효성
+#
+# 두 신호 중 먼저 나온 신호부터 120분
+# 순서는 관계없음.
 # =========================================================
 
-def clear_all_waiting(db):
-
-    db.execute(
-        """
-        DELETE FROM waiting
-        WHERE symbol = 'NAS'
-        """
-    )
-
-
-# =========================================================
-# [10] BUY 대기 유효성 확인
-# =========================================================
-
-def buy_waiting_valid(row):
+def buy_pair_valid(row):
 
     if not row:
         return False
@@ -454,24 +406,44 @@ def buy_waiting_valid(row):
     if not row["support_at"]:
         return False
 
+    if not row["buy_force_ready"]:
+        return False
+
+    if not row["buy_force_at"]:
+        return False
+
     support_at = datetime.fromisoformat(
         row["support_at"]
     )
 
-    elapsed = (
-        datetime.now(UTC) - support_at
+    buy_force_at = datetime.fromisoformat(
+        row["buy_force_at"]
     )
 
-    return elapsed <= timedelta(
-        seconds=WAIT_SECONDS
+    first_at = min(
+        support_at,
+        buy_force_at
+    )
+
+    second_at = max(
+        support_at,
+        buy_force_at
+    )
+
+    return (
+        second_at - first_at
+        <= timedelta(seconds=WAIT_SECONDS)
     )
 
 
 # =========================================================
-# [11] SELL 대기 유효성 확인
+# [10] SELL 조합 유효성
+#
+# 두 신호 중 먼저 나온 신호부터 120분
+# 순서는 관계없음.
 # =========================================================
 
-def sell_waiting_valid(row):
+def sell_pair_valid(row):
 
     if not row:
         return False
@@ -482,21 +454,46 @@ def sell_waiting_valid(row):
     if not row["resistance_at"]:
         return False
 
+    if not row["sell_force_ready"]:
+        return False
+
+    if not row["sell_force_at"]:
+        return False
+
     resistance_at = datetime.fromisoformat(
         row["resistance_at"]
     )
 
-    elapsed = (
-        datetime.now(UTC) - resistance_at
+    sell_force_at = datetime.fromisoformat(
+        row["sell_force_at"]
     )
 
-    return elapsed <= timedelta(
-        seconds=WAIT_SECONDS
+    first_at = min(
+        resistance_at,
+        sell_force_at
+    )
+
+    second_at = max(
+        resistance_at,
+        sell_force_at
+    )
+
+    return (
+        second_at - first_at
+        <= timedelta(seconds=WAIT_SECONDS)
     )
 
 
 # =========================================================
-# [12] 오래된 대기 자동 정리
+# [11] 오래된 단일 대기 자동 정리
+#
+# BUY:
+#   지지구간 또는 매수세력감지 중
+#   하나만 존재할 때 120분이 지나면 제거
+#
+# SELL:
+#   저항구간 또는 매도세력감지 중
+#   하나만 존재할 때 120분이 지나면 제거
 # =========================================================
 
 def cleanup_expired_waiting(db):
@@ -512,40 +509,82 @@ def cleanup_expired_waiting(db):
     if row is None:
         return
 
-    # BUY 대기 만료
-    if row["support_ready"]:
+    now = datetime.now(UTC)
 
-        if not buy_waiting_valid(row):
+    # -----------------------------------------------------
+    # BUY
+    # -----------------------------------------------------
+
+    buy_times = []
+
+    if row["support_ready"] and row["support_at"]:
+        buy_times.append(
+            datetime.fromisoformat(row["support_at"])
+        )
+
+    if row["buy_force_ready"] and row["buy_force_at"]:
+        buy_times.append(
+            datetime.fromisoformat(row["buy_force_at"])
+        )
+
+    if buy_times:
+
+        first_buy = min(buy_times)
+
+        if now - first_buy > timedelta(
+            seconds=WAIT_SECONDS
+        ):
 
             clear_buy_waiting(db)
 
             print(
-                "[WAIT EXPIRED] NAS BUY"
+                "[WAIT EXPIRED] NAS BUY pair"
             )
 
-    # SELL 대기 만료
-    if row["resistance_ready"]:
+    # -----------------------------------------------------
+    # SELL
+    # -----------------------------------------------------
 
-        # row를 다시 읽는다.
-        row2 = db.execute(
-            """
-            SELECT *
-            FROM waiting
-            WHERE symbol = 'NAS'
-            """
-        ).fetchone()
+    row = db.execute(
+        """
+        SELECT *
+        FROM waiting
+        WHERE symbol = 'NAS'
+        """
+    ).fetchone()
 
-        if row2 and not sell_waiting_valid(row2):
+    if row is None:
+        return
+
+    sell_times = []
+
+    if row["resistance_ready"] and row["resistance_at"]:
+        sell_times.append(
+            datetime.fromisoformat(row["resistance_at"])
+        )
+
+    if row["sell_force_ready"] and row["sell_force_at"]:
+        sell_times.append(
+            datetime.fromisoformat(row["sell_force_at"])
+        )
+
+    if sell_times:
+
+        first_sell = min(sell_times)
+
+        if now - first_sell > timedelta(
+            seconds=WAIT_SECONDS
+        ):
 
             clear_sell_waiting(db)
 
             print(
-                "[WAIT EXPIRED] NAS SELL"
+                "[WAIT EXPIRED] NAS SELL pair"
             )
 
 
 # =========================================================
-# [13] WEBHOOK
+# [12] WEBHOOK
 # =========================================================
 
 @app.post("/webhook")
@@ -561,8 +600,7 @@ async def tradingview_webhook(
     ).strip()
 
     print(
-        f"\n[WEBHOOK RECEIVED] "
-        f"{message}"
+        f"\n[WEBHOOK RECEIVED] {message}"
     )
 
     parsed = parse_message(
@@ -587,7 +625,6 @@ async def tradingview_webhook(
 
     symbol, event = parsed
 
-    # NAS만 존재
     if symbol != "NAS":
 
         return {
@@ -597,15 +634,7 @@ async def tradingview_webhook(
             "kst": kst_now_text(),
         }
 
-    # =====================================================
-    # DATABASE
-    # =====================================================
-
     with database() as db:
-
-        # -------------------------------------------------
-        # 만료된 대기 정리
-        # -------------------------------------------------
 
         ensure_nas_waiting(db)
 
@@ -614,7 +643,7 @@ async def tradingview_webhook(
         # =================================================
         # [A] 매수세력빠짐
         #
-        # 대기 상태와 관계없이 즉시 신호 생성
+        # 대기 상태와 관계없이 즉시 CLOSE_BUY
         # =================================================
 
         if event == "close_buy":
@@ -640,7 +669,7 @@ async def tradingview_webhook(
         # =================================================
         # [B] 매도세력빠짐
         #
-        # 대기 상태와 관계없이 즉시 신호 생성
+        # 대기 상태와 관계없이 즉시 CLOSE_SELL
         # =================================================
 
         if event == "close_sell":
@@ -664,27 +693,25 @@ async def tradingview_webhook(
             }
 
         # =================================================
-        # [D] NAS 지지구간
+        # [C] NAS 지지구간
         #
-        # 생성/진입 모두 여기로 들어옴
-        #
-        # 같은 방향 신호가 다시 오면
-        # support_at을 현재 시간으로 갱신
+        # 매수세력감지가 먼저 왔든
+        # 지지구간이 먼저 왔든 상관없음.
         # =================================================
 
         if event == "support":
 
             current_time = now_iso()
 
+            # 지지구간은 같은 방향의 기준 신호이므로
+            # 다시 들어오면 120분 타이머 갱신.
             db.execute(
                 """
                 UPDATE waiting
-
                 SET
                     support_ready = 1,
                     support_at = ?,
                     updated_at = ?
-
                 WHERE symbol = 'NAS'
                 """,
                 (
@@ -693,9 +720,43 @@ async def tradingview_webhook(
                 ),
             )
 
+            row = db.execute(
+                """
+                SELECT *
+                FROM waiting
+                WHERE symbol = 'NAS'
+                """
+            ).fetchone()
+
+            # 매수세력감지가 이미 살아 있으면
+            # 순서와 관계없이 즉시 BUY
+            if buy_pair_valid(row):
+
+                clear_buy_waiting(db)
+
+                signal_id = create_signal(
+                    db,
+                    "NAS",
+                    "BUY"
+                )
+
+                print(
+                    f"[BUY FINAL] signal_id={signal_id} "
+                    f"reason=buy_force_then_support"
+                )
+
+                return {
+                    "status": "final_signal",
+                    "id": signal_id,
+                    "symbol": "NAS",
+                    "direction": "BUY",
+                    "reason": "two_buy_signals_within_120_minutes",
+                    "kst": kst_now_text(),
+                }
+
             print(
                 "[WAIT BUY] "
-                "NAS 지지구간 → 120분 시작/갱신"
+                "NAS 지지구간 → 매수세력감지 대기"
             )
 
             return {
@@ -707,12 +768,10 @@ async def tradingview_webhook(
             }
 
         # =================================================
-        # [E] NAS 저항구간
+        # [D] NAS 저항구간
         #
-        # 생성/진입 모두 여기로 들어옴
-        #
-        # 같은 방향 신호가 다시 오면
-        # resistance_at을 현재 시간으로 갱신
+        # 매도세력감지가 먼저 왔든
+        # 저항구간이 먼저 왔든 상관없음.
         # =================================================
 
         if event == "resistance":
@@ -722,12 +781,10 @@ async def tradingview_webhook(
             db.execute(
                 """
                 UPDATE waiting
-
                 SET
                     resistance_ready = 1,
                     resistance_at = ?,
                     updated_at = ?
-
                 WHERE symbol = 'NAS'
                 """,
                 (
@@ -736,9 +793,43 @@ async def tradingview_webhook(
                 ),
             )
 
+            row = db.execute(
+                """
+                SELECT *
+                FROM waiting
+                WHERE symbol = 'NAS'
+                """
+            ).fetchone()
+
+            # 매도세력감지가 이미 살아 있으면
+            # 순서와 관계없이 즉시 SELL
+            if sell_pair_valid(row):
+
+                clear_sell_waiting(db)
+
+                signal_id = create_signal(
+                    db,
+                    "NAS",
+                    "SELL"
+                )
+
+                print(
+                    f"[SELL FINAL] signal_id={signal_id} "
+                    f"reason=sell_force_then_resistance"
+                )
+
+                return {
+                    "status": "final_signal",
+                    "id": signal_id,
+                    "symbol": "NAS",
+                    "direction": "SELL",
+                    "reason": "two_sell_signals_within_120_minutes",
+                    "kst": kst_now_text(),
+                }
+
             print(
                 "[WAIT SELL] "
-                "NAS 저항구간 → 120분 시작/갱신"
+                "NAS 저항구간 → 매도세력감지 대기"
             )
 
             return {
@@ -750,13 +841,33 @@ async def tradingview_webhook(
             }
 
         # =================================================
-        # [F] 매수세력감지
+        # [E] 매수세력감지
         #
-        # 반드시 현재 BUY 대기가 살아 있어야 함
+        # 지지구간이 먼저 왔든
+        # 매수세력감지가 먼저 왔든 상관없음.
         # =================================================
 
         if event == "buy_force":
 
+            current_time = now_iso()
+
+            # 매수세력감지 자체가 먼저 나온 경우에도
+            # 120분 동안 지지구간을 기다린다.
+            db.execute(
+                """
+                UPDATE waiting
+                SET
+                    buy_force_ready = 1,
+                    buy_force_at = ?,
+                    updated_at = ?
+                WHERE symbol = 'NAS'
+                """,
+                (
+                    current_time,
+                    current_time,
+                ),
+            )
+
             row = db.execute(
                 """
                 SELECT *
@@ -765,70 +876,71 @@ async def tradingview_webhook(
                 """
             ).fetchone()
 
-            # 대기 없음
-            if row is None:
-
-                print(
-                    "[BUY IGNORED] "
-                    "매수 대기 없음"
-                )
-
-                return {
-                    "status": "ignored",
-                    "reason": "no_buy_waiting",
-                    "symbol": "NAS",
-                    "kst": kst_now_text(),
-                }
-
-            # 대기 만료
-            if not buy_waiting_valid(row):
+            # 지지구간과 120분 이내면 즉시 BUY
+            if buy_pair_valid(row):
 
                 clear_buy_waiting(db)
 
+                signal_id = create_signal(
+                    db,
+                    "NAS",
+                    "BUY"
+                )
+
                 print(
-                    "[BUY IGNORED] "
-                    "120분 대기 만료"
+                    f"[BUY FINAL] signal_id={signal_id} "
+                    f"reason=support_then_buy_force"
                 )
 
                 return {
-                    "status": "ignored",
-                    "reason": "buy_waiting_expired",
+                    "status": "final_signal",
+                    "id": signal_id,
                     "symbol": "NAS",
+                    "direction": "BUY",
+                    "reason": "two_buy_signals_within_120_minutes",
                     "kst": kst_now_text(),
                 }
 
-            # -------------------------------------------------
-            # BUY 최종 신호
-            # -------------------------------------------------
-
-            clear_buy_waiting(db)
-
-            signal_id = create_signal(
-                db,
-                "NAS",
-                "BUY"
-            )
-
             print(
-                f"[BUY FINAL] signal_id={signal_id}"
+                "[WAIT BUY] "
+                "매수세력감지 → 지지구간 대기"
             )
 
             return {
-                "status": "final_signal",
-                "id": signal_id,
+                "status": "waiting",
                 "symbol": "NAS",
                 "direction": "BUY",
-                "reason": "support_then_buy_force",
+                "wait_seconds": WAIT_SECONDS,
                 "kst": kst_now_text(),
             }
 
         # =================================================
-        # [G] 매도세력감지
+        # [F] 매도세력감지
         #
-        # 반드시 현재 SELL 대기가 살아 있어야 함
+        # 저항구간이 먼저 왔든
+        # 매도세력감지가 먼저 왔든 상관없음.
         # =================================================
 
         if event == "sell_force":
+
+            current_time = now_iso()
+
+            # 매도세력감지 자체가 먼저 나온 경우에도
+            # 120분 동안 저항구간을 기다린다.
+            db.execute(
+                """
+                UPDATE waiting
+                SET
+                    sell_force_ready = 1,
+                    sell_force_at = ?,
+                    updated_at = ?
+                WHERE symbol = 'NAS'
+                """,
+                (
+                    current_time,
+                    current_time,
+                ),
+            )
 
             row = db.execute(
                 """
@@ -838,60 +950,41 @@ async def tradingview_webhook(
                 """
             ).fetchone()
 
-            # 대기 없음
-            if row is None:
-
-                print(
-                    "[SELL IGNORED] "
-                    "매도 대기 없음"
-                )
-
-                return {
-                    "status": "ignored",
-                    "reason": "no_sell_waiting",
-                    "symbol": "NAS",
-                    "kst": kst_now_text(),
-                }
-
-            # 대기 만료
-            if not sell_waiting_valid(row):
+            # 저항구간과 120분 이내면 즉시 SELL
+            if sell_pair_valid(row):
 
                 clear_sell_waiting(db)
 
+                signal_id = create_signal(
+                    db,
+                    "NAS",
+                    "SELL"
+                )
+
                 print(
-                    "[SELL IGNORED] "
-                    "120분 대기 만료"
+                    f"[SELL FINAL] signal_id={signal_id} "
+                    f"reason=resistance_then_sell_force"
                 )
 
                 return {
-                    "status": "ignored",
-                    "reason": "sell_waiting_expired",
+                    "status": "final_signal",
+                    "id": signal_id,
                     "symbol": "NAS",
+                    "direction": "SELL",
+                    "reason": "two_sell_signals_within_120_minutes",
                     "kst": kst_now_text(),
                 }
 
-            # -------------------------------------------------
-            # SELL 최종 신호
-            # -------------------------------------------------
-
-            clear_sell_waiting(db)
-
-            signal_id = create_signal(
-                db,
-                "NAS",
-                "SELL"
-            )
-
             print(
-                f"[SELL FINAL] signal_id={signal_id}"
+                "[WAIT SELL] "
+                "매도세력감지 → 저항구간 대기"
             )
 
             return {
-                "status": "final_signal",
-                "id": signal_id,
+                "status": "waiting",
                 "symbol": "NAS",
                 "direction": "SELL",
-                "reason": "resistance_then_sell_force",
+                "wait_seconds": WAIT_SECONDS,
                 "kst": kst_now_text(),
             }
 
@@ -909,7 +1002,7 @@ async def tradingview_webhook(
 
 
 # =========================================================
-# [14] 현재 대기 상태
+# [13] 현재 대기 상태
 # =========================================================
 
 @app.get("/waiting/NAS")
@@ -918,7 +1011,6 @@ def get_nas_waiting():
     with database() as db:
 
         ensure_nas_waiting(db)
-
         cleanup_expired_waiting(db)
 
         row = db.execute(
@@ -937,19 +1029,36 @@ def get_nas_waiting():
                 "sell_waiting": False,
             }
 
-        buy_remaining = 0
-        sell_remaining = 0
+        now = datetime.now(UTC)
 
+        # -------------------------------------------------
         # BUY 남은 시간
-        if row["support_ready"]:
+        # -------------------------------------------------
 
-            support_at = datetime.fromisoformat(
-                row["support_at"]
+        buy_times = []
+
+        if row["support_ready"] and row["support_at"]:
+            buy_times.append(
+                datetime.fromisoformat(
+                    row["support_at"]
+                )
             )
 
+        if row["buy_force_ready"] and row["buy_force_at"]:
+            buy_times.append(
+                datetime.fromisoformat(
+                    row["buy_force_at"]
+                )
+            )
+
+        buy_remaining = 0
+
+        if buy_times:
+
+            first_buy = min(buy_times)
+
             elapsed = (
-                datetime.now(UTC)
-                - support_at
+                now - first_buy
             ).total_seconds()
 
             buy_remaining = max(
@@ -959,16 +1068,34 @@ def get_nas_waiting():
                 )
             )
 
+        # -------------------------------------------------
         # SELL 남은 시간
-        if row["resistance_ready"]:
+        # -------------------------------------------------
 
-            resistance_at = datetime.fromisoformat(
-                row["resistance_at"]
+        sell_times = []
+
+        if row["resistance_ready"] and row["resistance_at"]:
+            sell_times.append(
+                datetime.fromisoformat(
+                    row["resistance_at"]
+                )
             )
 
+        if row["sell_force_ready"] and row["sell_force_at"]:
+            sell_times.append(
+                datetime.fromisoformat(
+                    row["sell_force_at"]
+                )
+            )
+
+        sell_remaining = 0
+
+        if sell_times:
+
+            first_sell = min(sell_times)
+
             elapsed = (
-                datetime.now(UTC)
-                - resistance_at
+                now - first_sell
             ).total_seconds()
 
             sell_remaining = max(
@@ -983,6 +1110,15 @@ def get_nas_waiting():
 
             "buy_waiting": bool(
                 row["support_ready"]
+                or row["buy_force_ready"]
+            ),
+
+            "buy_support_ready": bool(
+                row["support_ready"]
+            ),
+
+            "buy_force_ready": bool(
+                row["buy_force_ready"]
             ),
 
             "buy_remaining_seconds":
@@ -996,6 +1132,15 @@ def get_nas_waiting():
 
             "sell_waiting": bool(
                 row["resistance_ready"]
+                or row["sell_force_ready"]
+            ),
+
+            "sell_resistance_ready": bool(
+                row["resistance_ready"]
+            ),
+
+            "sell_force_ready": bool(
+                row["sell_force_ready"]
             ),
 
             "sell_remaining_seconds":
@@ -1012,7 +1157,7 @@ def get_nas_waiting():
 
 
 # =========================================================
-# [15] 신호 확인
+# [14] 신호 확인
 # =========================================================
 
 @app.get("/signal/NAS")
@@ -1030,13 +1175,9 @@ def get_nas_signals():
                 status,
                 executor_id,
                 result_detail
-
             FROM signals
-
             WHERE symbol = 'NAS'
-
             ORDER BY id DESC
-
             LIMIT 50
             """
         ).fetchall()
@@ -1051,7 +1192,7 @@ def get_nas_signals():
 
 
 # =========================================================
-# [16] MT5 EXECUTOR → NEXT SIGNAL
+# [15] MT5 EXECUTOR → NEXT SIGNAL
 # =========================================================
 
 @app.get("/api/v1/signals/next")
@@ -1074,15 +1215,12 @@ def next_signal(
         db.execute(
             """
             UPDATE signals
-
             SET
                 status = 'pending',
                 lease_until = NULL,
                 executor_id = NULL
-
             WHERE
                 status = 'leased'
-
                 AND lease_until < ?
             """,
             (now,),
@@ -1096,11 +1234,8 @@ def next_signal(
             """
             SELECT *
             FROM signals
-
             WHERE status = 'pending'
-
             ORDER BY id
-
             LIMIT 1
             """
         ).fetchone()
@@ -1125,19 +1260,17 @@ def next_signal(
         db.execute(
             """
             UPDATE signals
-
             SET
                 status = 'leased',
                 lease_until = ?,
                 executor_id = ?
-
             WHERE id = ?
             """,
             (
                 lease_until,
                 executor_id,
                 row["id"],
-            ),
+            )
         )
 
         print(
@@ -1158,7 +1291,7 @@ def next_signal(
 
 
 # =========================================================
-# [17] MT5 EXECUTOR → ACK
+# [16] MT5 EXECUTOR → ACK
 # =========================================================
 
 @app.post(
@@ -1177,21 +1310,34 @@ async def acknowledge(
     #     "result_detail": "..."
     # }
     #
-    # 기존 status/detial 형식도 호환
+    # 기존 status/detail 형식도 호환
+
     success = payload.get("success")
 
     if success is not None:
-        status = "done" if bool(success) else "failed"
+
+        status = (
+            "done"
+            if bool(success)
+            else "failed"
+        )
+
         detail = str(
-            payload.get("result_detail", "")
+            payload.get(
+                "result_detail",
+                ""
+            )
         )[:500]
+
     else:
+
         status = payload.get("status")
 
         if status not in (
             "done",
             "failed"
         ):
+
             raise HTTPException(
                 status_code=422,
                 detail=(
@@ -1209,12 +1355,10 @@ async def acknowledge(
         updated = db.execute(
             """
             UPDATE signals
-
             SET
                 status = ?,
                 result_detail = ?,
                 lease_until = NULL
-
             WHERE id = ?
             """,
             (
@@ -1243,7 +1387,7 @@ async def acknowledge(
 
 
 # =========================================================
-# [18] HEALTH CHECK
+# [17] HEALTH CHECK
 # =========================================================
 
 @app.get("/health")
@@ -1257,6 +1401,9 @@ def health():
 
         "wait_minutes":
             WAIT_SECONDS // 60,
+
+        "pair_order":
+            "ANY ORDER",
 
         "btc":
             "IGNORED",
