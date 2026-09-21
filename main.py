@@ -1286,6 +1286,7 @@ def next_signal(
                 "id": row["id"],
                 "symbol": row["symbol"],
                 "direction": row["direction"],
+                "created_at": row["created_at"]
             }
         }
 
