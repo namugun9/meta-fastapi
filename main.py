@@ -9,12 +9,12 @@ from typing import Optional, Tuple
 
 from fastapi import FastAPI, HTTPException, Request
 
-
 app = FastAPI(title="Ella NAS100 Signal Filter")
 
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", "signals.db"))
 
-WAIT_SECONDS = 120 * 60
+# 대기 시간: 30분 (1800초)
+WAIT_SECONDS = 30 * 60  
 LEASE_SECONDS = int(os.getenv("LEASE_SECONDS", "90"))
 
 UTC = timezone.utc
@@ -27,6 +27,7 @@ EVENT_GROUP = {
     "sell_force": "SELL",
 }
 
+# 각 이벤트의 필수 짝 지정
 EVENT_COMPLEMENT = {
     "support": "buy_force",
     "buy_force": "support",
@@ -59,14 +60,8 @@ def ensure_schema():
         db.execute("""
         CREATE TABLE IF NOT EXISTS waiting (
             symbol TEXT PRIMARY KEY,
-            support_ready INTEGER NOT NULL DEFAULT 0,
-            support_at TEXT,
-            buy_force_ready INTEGER NOT NULL DEFAULT 0,
-            buy_force_at TEXT,
-            resistance_ready INTEGER NOT NULL DEFAULT 0,
-            resistance_at TEXT,
-            sell_force_ready INTEGER NOT NULL DEFAULT 0,
-            sell_force_at TEXT,
+            last_type TEXT,
+            last_at TEXT,
             updated_at TEXT NOT NULL
         )
         """)
@@ -77,10 +72,6 @@ def ensure_schema():
         }
 
         new_columns = {
-            "buy_force_ready": "INTEGER NOT NULL DEFAULT 0",
-            "buy_force_at": "TEXT",
-            "sell_force_ready": "INTEGER NOT NULL DEFAULT 0",
-            "sell_force_at": "TEXT",
             "last_type": "TEXT",
             "last_at": "TEXT",
         }
@@ -152,13 +143,11 @@ def create_signal(db, symbol, direction):
 
 def ensure_nas_waiting(db):
     row = db.execute("SELECT * FROM waiting WHERE symbol = 'NAS'").fetchone()
-    if row is not None:
-        return
-
-    db.execute(
-        "INSERT INTO waiting (symbol, last_type, last_at, updated_at) VALUES ('NAS', NULL, NULL, ?)",
-        (now_iso(),),
-    )
+    if row is None:
+        db.execute(
+            "INSERT INTO waiting (symbol, last_type, last_at, updated_at) VALUES ('NAS', NULL, NULL, ?)",
+            (now_iso(),),
+        )
 
 
 def get_last_event(db):
@@ -190,12 +179,14 @@ def clear_last_event(db):
 
 
 def handle_pairable_event(db, event: str):
+    ensure_nas_waiting(db)
     row = get_last_event(db)
-    direction = EVENT_GROUP[event]
-    complement = EVENT_COMPLEMENT[event]
+    direction = EVENT_GROUP[event]          # BUY 또는 SELL
+    complement = EVENT_COMPLEMENT[event]    # 현재 신호와 짝을 이루는 이벤트
 
+    # 1. 기존 저장된 단일 대기 신호가 존재하고, 유효시간(30분) 내이며, 정확히 '짝'인지 검증
     if last_event_is_valid(row) and row["last_type"] == complement:
-        clear_last_event(db)
+        clear_last_event(db)  # 진입 신호 생성 후 대기 상태 초기화
         signal_id = create_signal(db, "NAS", direction)
 
         print(f"[{direction} FINAL] signal_id={signal_id} reason={complement}_then_{event}")
@@ -205,12 +196,13 @@ def handle_pairable_event(db, event: str):
             "id": signal_id,
             "symbol": "NAS",
             "direction": direction,
-            "reason": f"{complement}_then_{event}_within_120_minutes",
+            "reason": f"{complement}_then_{event}_within_30_minutes",
             "kst": kst_now_text(),
         }
 
+    # 2. 조건 미충족 시(짝이 아니거나 시간 초과 등) 현재 수신된 신호를 단일 대기 신호로 새로 갱신
     set_last_event(db, event)
-    print(f"[WAIT {direction}] 마지막 신호를 '{event}'로 갱신")
+    print(f"[WAIT {direction}] 단일 대기 신호를 '{event}'로 저장 (30분 대기)")
 
     return {
         "status": "waiting",
@@ -246,8 +238,6 @@ async def tradingview_webhook(request: Request):
         }
 
     with database() as db:
-        ensure_nas_waiting(db)
-
         if event == "close_buy":
             signal_id = create_signal(db, "NAS", "CLOSE_BUY")
             print(f"[CLOSE_BUY] signal_id={signal_id}")
@@ -289,7 +279,7 @@ def get_nas_waiting():
         row = get_last_event(db)
 
         if not last_event_is_valid(row):
-            if row is not None and row["last_type"]:
+            if row is None or row["last_type"]:
                 clear_last_event(db)
             return {"symbol": "NAS", "waiting": False, "kst": kst_now_text()}
 
@@ -402,7 +392,7 @@ def health():
         "status": "ok",
         "system": "NAS100 ONLY",
         "wait_minutes": WAIT_SECONDS // 60,
-        "pair_mode": "LAST_SIGNAL_ONLY",
+        "pair_mode": "SINGLE_LAST_SIGNAL_ONLY",
         "btc": "IGNORED",
         "trading_time": "UNLIMITED",
         "kst": kst_now_text(),
